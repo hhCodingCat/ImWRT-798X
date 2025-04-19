@@ -114,7 +114,6 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          # 清理无用文件，释放磁盘空间
           sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
           sudo -E apt-get -qq update
@@ -131,12 +130,35 @@ jobs:
           sudo mkdir -p /workdir
           sudo chown $USER:$GROUPS /workdir
 
-      - name: 缓存下载的软件包
+      - name: 缓存编译中间文件
         uses: actions/cache@v4
         with:
-          path: /workdir/openwrt/dl
-          key: ${{ runner.os }}-downloads-${{ hashFiles('feeds.conf.default') }}
-          restore-keys: ${{ runner.os }}-downloads-
+          path: |
+            /workdir/openwrt/dl
+            /workdir/openwrt/build_dir
+            /workdir/openwrt/staging_dir
+          key: ${{ runner.os }}-build-${{ matrix.device_model }}-${{ hashFiles('openwrt/.config', 'feeds.conf.default') }}
+          restore-keys: ${{ runner.os }}-build-${{ matrix.device_model }}-
+
+      - name: 缓存 ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-ccache-${{ matrix.device_model }}-${{ hashFiles('openwrt/.config', 'feeds.conf.default') }}
+          restore-keys: ${{ runner.os }}-ccache-${{ matrix.device_model }}-
+
+      - name: 配置 ccache
+        run: |
+          echo "export PATH=/usr/lib/ccache:$PATH" >> $GITHUB_ENV
+          echo "export CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+          ccache -M 5G
+
+      - name: 缓存 Feeds
+        uses: actions/cache@v4
+        with:
+          path: /workdir/openwrt/feeds
+          key: ${{ runner.os }}-feeds-${{ hashFiles('feeds.conf.default') }}
+          restore-keys: ${{ runner.os }}-feeds-
 
       - name: 安装 GitHub CLI
         run: |
@@ -149,6 +171,15 @@ jobs:
           git clone $REPO_URL -b $REPO_BRANCH openwrt
           ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
+      - name: 检查 Feeds 配置变更
+        id: check_feeds
+        run: |
+          if [ -f openwrt/feeds.conf.default ] && cmp -s openwrt/feeds.conf.default $FEEDS_CONF; then
+            echo "feeds_unchanged=true" >> $GITHUB_OUTPUT
+          else
+            echo "feeds_unchanged=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: 加载 Feeds
         run: |
           [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
@@ -157,6 +188,7 @@ jobs:
           $GITHUB_WORKSPACE/$DIY_P1_SH
 
       - name: 更新 Feeds
+        if: steps.check_feeds.outputs.feeds_unchanged == 'false'
         run: |
           cd openwrt
           ./scripts/feeds update -a || { echo "更新 Feeds 失败"; exit 1; }
@@ -170,22 +202,38 @@ jobs:
           chmod +x $DIY_P2_SH
           cd openwrt
           $GITHUB_WORKSPACE/$DIY_P2_SH
+          make defconfig
 
       - name: 下载软件包
         id: package
         run: |
           cd openwrt
-          make defconfig
           make download -j8 || { echo "下载软件包失败"; exit 1; }
-          find dl -size -1024c -exec ls -l {} \;
           find dl -size -1024c -exec rm -f {} \;
 
       - name: 修改 5G 25dB
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.enable_5g_25db == 'true'
         working-directory: ./openwrt
         run: |
-          mkdir -p package/mtk/drivers/mt_wifi/files/mt7981-default-eeprom
-          printf '\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B' | dd of=package/mtk/drivers/mt_wifi/files/mt7981-default-eeprom/MT7981_iPAiLNA_EEPROM.bin bs=1 seek=$((0x445)) conv=notrunc
+          EEPROM_FILE=package/mtk/drivers/mt_wifi/files/mt7981-default-eeprom/MT7981_iPAiLNA_EEPROM.bin
+          EXPECTED_CONTENT=$(printf '\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B')
+          if [ ! -f "$EEPROM_FILE" ] || ! dd if="$EEPROM_FILE" bs=1 skip=$((0x445)) count=20 2>/dev/null | grep -q "$EXPECTED_CONTENT"; then
+            mkdir -p package/mtk/drivers/mt_wifi/files/mt7981-default-eeprom
+            printf '\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B' | dd of="$EEPROM_FILE" bs=1 seek=$((0x445)) conv=notrunc
+            echo "EEPROM 文件已更新"
+          else
+            echo "EEPROM 文件无需修改"
+          fi
+
+      - name: 检查源码变更
+        id: check_source
+        run: |
+          cd openwrt
+          if git diff --name-only HEAD^ HEAD | grep -E '^(package/|target/)'; then
+            echo "source_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "source_changed=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: 编译固件
         id: compile
@@ -193,11 +241,24 @@ jobs:
         run: |
           set -e
           cd openwrt
-          echo -e "$(($(nproc)-1)) thread compile"
-          make -j$(($(nproc)-1)) || make -j1 || { make -j1 V=s && exit 1; }
+          if [ "${{ steps.check_source.outputs.source_changed }}" == "false" ]; then
+            echo "无源码变更，执行增量编译"
+            make -j$(nproc) CCACHE=1 package/index
+            make -j1 target/install
+          else
+            echo "检测到源码变更，执行完整编译"
+            make -j$(nproc) CCACHE=1 || { make -j1 V=s CCACHE=1 && exit 1; }
+          fi
           echo "status=success" >> $GITHUB_OUTPUT
           echo "DEVICE_NAME=_${{ matrix.device_model }}" >> $GITHUB_ENV
           echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+
+      - name: 上传编译日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compile-log-${{ matrix.device_model }}
+          path: openwrt/build_dir/**/*.log
 
       - name: 提取固件版本号
         id: version
@@ -316,12 +377,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 只删除超过 20 个的旧 releases
-          gh release list --repo ${{ github.repository }} --limit 100 | tail -n +21 | awk '{print $1}' | xargs -I {} gh release delete {} --yes || true
+          gh release list --repo ${{ github.repository }} --limit 100 | grep -E "v24.10-${{ matrix.device_model }}" | tail -n +21 | awk '{print $1}' | xargs -I {} gh release delete {} --yes || true
 
       - name: 清理旧工作流运行
         if: steps.tag.outputs.status == 'success'
         uses: Mattraks/delete-workflow-runs@v2
         with:
-          retain_days: 1  # 保留至少 1 天的运行记录
+          retain_days: 1
           keep_minimum_runs: 20
