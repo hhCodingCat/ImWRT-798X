@@ -48,7 +48,7 @@ on:
         description: '源代码仓库分支'
         default: 'openwrt-24.10-6.6'
   schedule:
-    - cron: '0 7 * * 5'  # 每周五07:00 UTC（北京时间15:00）
+    - cron: '0 7 * * *'  # 每日07:00 UTC（北京时间15:00）
 
 permissions:
   contents: write
@@ -113,7 +113,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        device_model: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', github.event.inputs.device_model)) || fromJSON('["cmcc_rax3000m", "cmcc_rax3000m-emmc", "cudy_ap3000-v1", "cudy_ap3000outdoor-v1", "cudy_m3000-v1", "cudy_re3000-v1", "cudy_tr3000-v1", "cudy_tr3000-v1-256mb", "cudy_wr3000-v1", "cudy_wr3000s-v1", "glinet_gl-mt2500", "glinet_gl-mt3000", "glinet_gl-x3000", "glinet_gl-xe3000", "h3c_magic-nx30-pro", "huasifei_wh3000-pro", "huasifei_wh3000-emmc", "jcg_q30-pro", "livinet_zr-3020", "routerich_ax3000", "routerich_ax3000-v1", "xiaomi_mi-router-ax3000t", "xiaomi_mi-router-wr30u-stock", "xiaomi_redmi-router-ax6000-stock", "zyxel_ex5601-t0-stock", "zyxel_nwa50ax-pro"]') }}
+        # 定时任务仅编译cmcc_rax3000m-emmc，手动触发保留全设备列表
+        device_model: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', github.event.inputs.device_model)) || fromJSON('["cmcc_rax3000m-emmc"]') }}
       max-parallel: 18
     steps:
       - name: 打印调试信息
