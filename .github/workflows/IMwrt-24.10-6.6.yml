@@ -58,7 +58,7 @@ env:
   REPO_URL: ${{ github.event.inputs.repo_url || 'https://github.com/padavanonly/immortalwrt-mt798x-24.10' }}
   REPO_BRANCH: ${{ github.event.inputs.repo_branch || 'openwrt-24.10-6.6' }}
   FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: 24.10-6.6.config
+  CONFIG_FILE: config/24.10-6.6.config
   DIY_P1_SH: scripts/diy-part1.sh
   DIY_P2_SH: scripts/diy-part2.sh
   UPLOAD_FIRMWARE: true
