@@ -170,7 +170,7 @@ jobs:
           ${{ matrix.config }}
           EOF
           
-          [ -e config ] && cat config/config-common >> $SOURCE_NAME/.config || true
+          [ -e config ] && cat config/config-op25 >> $SOURCE_NAME/.config || true
           
           sed -i "s/192.168.1.1/${{ env.OP_IP }}/g" $SOURCE_NAME/package/base-files/files/bin/config_generate
           
