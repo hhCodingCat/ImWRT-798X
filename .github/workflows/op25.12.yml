@@ -1,0 +1,253 @@
+name: openwrt25.12
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      OP_IP:
+        description: '静态IP地址'
+        required: false
+        default: '192.168.2.1'
+        type: string
+      OP_author:
+        description: '定制作者'
+        required: false
+        default: 'WIFI高功率26dB'
+        type: string
+      CUSTOM_PLUGINS:
+        description: '自定义插件名称，用空格分隔'
+        required: false
+        default: 'luci-theme-aurora luci-app-diskman luci-app-ksmbd'
+        type: string
+
+env:
+  DIY_P1_SH: sh/op.sh
+
+jobs:
+  build_firmware:
+    name: 编译固件 - ${{ matrix.device }} - ${{ matrix.source }}
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        device: ["rax3000m", "rax3000me", "rax3000m-emmc", "rax3000m-nand", "rax3000m-256m-nand", "xr30-emmc", "xr30-nand"]
+        source: ["openwrt"]
+        include:
+          - device: "rax3000m"
+            config: "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m=y"
+          - device: "rax3000me"
+            config: "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000me=y"
+          - device: "rax3000m-emmc"
+            config: "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-emmc=y"
+          - device: "rax3000m-nand"
+            config: "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand=y"
+          - device: "rax3000m-256m-nand"
+            config: "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-256m-nand=y"
+          - device: "xr30-nand"
+            config: "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_xr30-nand=y"
+          - device: "xr30-emmc"
+            config: "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_xr30-emmc=y"
+
+    steps:
+      - name: 检查分支
+        uses: actions/checkout@v4
+
+      - name: 释放磁盘空间（安全版）
+        run: |
+          sudo apt-get remove --purge -y firefox* google-chrome* microsoft* mono* dotnet* azure* || true
+          sudo apt-get autoremove -y --purge
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+          sudo docker system prune -af --volumes || true
+          df -h
+
+      - name: 安装编译环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            build-essential ccache cmake curl file g++ gawk gcc-multilib gettext git \
+            libncurses5-dev libssl-dev python3 python3-distutils python3-setuptools \
+            python3-pyelftools rsync subversion unzip zlib1g-dev patch wget \
+            asciidoc binutils bzip2 flex bison lib32gcc-s1 libc6-dev-i386 \
+            uglifyjs msmtp texinfo libreadline-dev libglib2.0-dev xmlto libelf-dev \
+            libtool autopoint gperf swig coreutils haveged scons rename qemu-utils
+          sudo apt-get clean
+          git config --global user.name 'GitHub Actions'
+          git config --global user.email 'noreply@github.com'
+          sudo timedatectl set-timezone 'Asia/Shanghai'
+          sudo mkdir -p /workdir
+          sudo chown $USER:$GROUPS /workdir
+          df -h
+
+      - name: 设置环境变量
+        run: |
+          TAG="$(date +'%Y%m%d')"
+          echo "tag=$TAG" >> $GITHUB_ENV
+          echo "OP_IP=${{ github.event.inputs.OP_IP }}" >> $GITHUB_ENV
+          echo "OP_author=${{ github.event.inputs.OP_author }}" >> $GITHUB_ENV
+          echo "CUSTOM_PLUGINS=${{ github.event.inputs.CUSTOM_PLUGINS }}" >> $GITHUB_ENV
+          echo "DEVICE_NAME=${{ matrix.device }}" >> $GITHUB_ENV
+          echo "SOURCE_NAME=${{ matrix.source }}" >> $GITHUB_ENV
+          echo "REPO_URL=https://github.com/shiyu1314/openwrt-source" >> $GITHUB_ENV
+          echo "REPO_BRANCH=openwrt-25.12" >> $GITHUB_ENV
+
+      - name: 克隆源代码
+        working-directory: /workdir
+        run: |
+          git clone $REPO_URL $SOURCE_NAME
+          ln -sf /workdir/$SOURCE_NAME $GITHUB_WORKSPACE/$SOURCE_NAME
+
+      - name: 切换到对应 tag
+        run: |
+          cd $SOURCE_NAME
+          case $REPO_BRANCH in
+            openwrt-25.12)
+              _release_tag=$(git tag --sort=taggerdate --list 'v25.*' | tail -1)
+              git checkout $_release_tag
+              ;;
+            *)
+              echo "无法匹配分支或 tag"
+              exit 1
+              ;;
+          esac
+          echo "release_tag=$_release_tag" >> $GITHUB_ENV
+
+      - name: 缓存 ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ env.SOURCE_NAME }}-${{ env.release_tag }}-${{ matrix.device }}-${{ hashFiles('**/feeds.conf.default', '**/Makefile', '**/feeds/*/Makefile') }}
+          restore-keys: |
+            ccache-${{ env.SOURCE_NAME }}-${{ env.release_tag }}-${{ matrix.device }}-
+            ccache-${{ env.SOURCE_NAME }}-${{ env.release_tag }}-
+
+      - name: 启用 ccache
+        run: |
+          echo "USE_CCACHE=1" >> $GITHUB_ENV
+          echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> $GITHUB_ENV
+          ccache -M 5G
+          ccache -o compression=true
+          ccache -z
+
+      - name: 缓存 toolchain + staging_dir
+        uses: actions/cache@v4
+        id: cache-toolchain
+        with:
+          path: |
+            ${{ env.SOURCE_NAME }}/staging_dir
+            ${{ env.SOURCE_NAME }}/build_dir/toolchain-*
+          key: toolchain-${{ env.SOURCE_NAME }}-${{ env.release_tag }}-${{ hashFiles('**/toolchain/**/Makefile', '**/Config-build.in') }}
+          restore-keys: |
+            toolchain-${{ env.SOURCE_NAME }}-${{ env.release_tag }}-
+            toolchain-${{ env.SOURCE_NAME }}-
+
+      - name: patch 修补
+        run: |
+          cd $SOURCE_NAME
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          cd ..
+          [ -e patch ] && cp -rf patch/diy/*.patch $SOURCE_NAME/ || true
+          [ -e patch ] && cp -rf patch/luci/*.patch $SOURCE_NAME/feeds/luci/ || true
+
+      - name: 加载自定义脚本 op.sh
+        run: |
+          chmod +x $DIY_P1_SH
+          cd $SOURCE_NAME
+          $GITHUB_WORKSPACE/$DIY_P1_SH || true
+          cd ..
+          [ -e patch ] && cp -rf patch/nginx/luci.locations $SOURCE_NAME/feeds/packages/net/nginx/files-luci-support/ || true
+          [ -e patch ] && cp -rf patch/nginx/uci.conf.template $SOURCE_NAME/feeds/packages/net/nginx-util/files/ || true
+
+      - name: 加载自定义配置 & files
+        run: |
+          [ -e files ] && mv files $SOURCE_NAME/files || true
+          
+          cat <<EOF >>$SOURCE_NAME/.config
+          CONFIG_TARGET_mediatek=y
+          CONFIG_TARGET_mediatek_filogic=y
+          ${{ matrix.config }}
+          EOF
+          
+          [ -e config ] && cat config/config-common >> $SOURCE_NAME/.config || true
+          
+          sed -i "s/192.168.1.1/${{ env.OP_IP }}/g" $SOURCE_NAME/package/base-files/files/bin/config_generate
+          
+          IFS=' ' read -r -a plugins <<< "${{ env.CUSTOM_PLUGINS }}"
+          for plugin in "${plugins[@]}"; do
+            [[ -n "$plugin" ]] && echo "CONFIG_PACKAGE_${plugin}=y" >> $SOURCE_NAME/.config
+          done
+
+      - name: defconfig + 下载所有依赖
+        run: |
+          cd $SOURCE_NAME
+          make defconfig
+          make download -j$(nproc) || make download -j8
+          find dl -size -1024c -delete || true
+
+      - name: 编译源码
+        run: |
+          cd $SOURCE_NAME
+          echo "编译线程数: $(($(nproc)*2))"
+          make -j$(($(nproc)*2)) IGNORE_ERRORS="n m" V=s || \
+          make -j$(nproc)        IGNORE_ERRORS="n m" V=s || \
+          make -j8               V=s
+
+      - name: 显示 ccache 统计（无论成功失败）
+        if: always()
+        run: ccache -s || true
+
+      - name: 查看磁盘使用情况
+        if: (!cancelled())
+        run: df -hT
+
+      - name: 整理输出文件
+        id: organize
+        run: |
+          cd $SOURCE_NAME/bin/targets/*/*
+          rm -rf packages *.buildinfo profiles.json *.manifest *bl2.bin *kernel.bin *.sha sha256sums || true
+          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+
+      - name: 上传固件到 Releases
+        uses: softprops/action-gh-release@v2.1.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.release_tag }}-${{env.tag}}
+          files: ${{ env.FIRMWARE }}/*
+          body: |
+            ====================固件信息=======================
+            分支/Tag：${{ env.release_tag }}
+            构建日期：${{ env.tag }}
+            设备：${{ env.DEVICE_NAME }}
+            静态IP：${{ env.OP_IP }}
+            插件：${{ env.CUSTOM_PLUGINS }}
+            定制作者：${{ env.OP_author }}
+            默认密码：无
+     
+      - name: 上传固件到 WebDAV 
+        if: success()
+        env:
+          WEBDAV_BASE: ${{ secrets.WEBDAV_URL }}/Openwrt2512
+          WEBDAV_USER: ${{ secrets.WEBDAV_USERNAME }}
+          WEBDAV_PASS: ${{ secrets.WEBDAV_PASSWORD }}
+        run: |
+          cd ${{ env.FIRMWARE }}
+          
+          curl -u "${WEBDAV_USER}:${WEBDAV_PASS}" -X MKCOL "${WEBDAV_BASE}/" || true
+          
+          for file in *; do
+            if [[ -f "$file" ]]; then
+              echo "Uploading $file ..."
+              curl -u "${WEBDAV_USER}:${WEBDAV_PASS}" -T "$file" "${WEBDAV_BASE}/$file" || echo "Failed: $file"
+            fi
+          done
+
+      - name: 清理旧 Releases
+        uses: dev-drprasad/delete-older-releases@v0.3.4
+        with:
+          keep_latest: 7
+          delete_tags: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
