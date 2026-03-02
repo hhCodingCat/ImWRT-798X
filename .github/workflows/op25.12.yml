@@ -21,7 +21,7 @@ on:
         type: string
 
 env:
-  DIY_P1_SH: sh/op.sh
+  DIY_P1_SH: scripts/diy-part4.sh
 
 jobs:
   build_firmware:
@@ -151,7 +151,7 @@ jobs:
           [ -e patch ] && cp -rf patch/diy/*.patch $SOURCE_NAME/ || true
           [ -e patch ] && cp -rf patch/luci/*.patch $SOURCE_NAME/feeds/luci/ || true
 
-      - name: 加载自定义脚本 op.sh
+      - name: 加载自定义脚本 diy-part4.sh
         run: |
           chmod +x $DIY_P1_SH
           cd $SOURCE_NAME
@@ -170,7 +170,7 @@ jobs:
           ${{ matrix.config }}
           EOF
           
-          [ -e config ] && cat config/config-op25 >> $SOURCE_NAME/.config || true
+          [ -e config ] && cat config/op25.config >> $SOURCE_NAME/.config || true
           
           sed -i "s/192.168.1.1/${{ env.OP_IP }}/g" $SOURCE_NAME/package/base-files/files/bin/config_generate
           
