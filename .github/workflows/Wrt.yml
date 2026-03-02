@@ -1,0 +1,355 @@
+name: ImmortalWrt
+
+on:
+  repository_dispatch:
+    types: [build_firmware]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'ImmortalWrt'
+        required: true
+        default: 'IMwrt-24.10'
+        type: choice
+        options:
+          - IMwrt-24.10
+          - IMwrt-25.12
+      device_model:
+        description: '选择目标设备型号 (代码)'
+        type: choice
+        required: true
+        options:
+          - cmcc_rax3000m
+          - cmcc_rax3000m-emmc
+          - cudy_ap3000-v1
+          - cudy_ap3000outdoor-v1
+          - cudy_m3000-v1
+          - cudy_re3000-v1
+          - cudy_tr3000-v1
+          - cudy_tr3000-v1-256mb
+          - cudy_wr3000-v1
+          - cudy_wr3000s-v1
+          - glinet_gl-mt2500
+          - glinet_gl-mt3000
+          - glinet_gl-x3000
+          - glinet_gl-xe3000
+          - h3c_magic-nx30-pro
+          - huasifei_wh3000-pro
+          - huasifei_wh3000-emmc
+          - jcg_q30-pro
+          - livinet_zr-3020
+          - routerich_ax3000
+          - routerich_ax3000-v1
+          - xiaomi_mi-router-ax3000t
+          - xiaomi_mi-router-wr30u-stock
+          - xiaomi_redmi-router-ax6000-stock
+          - zyxel_ex5601-t0-stock
+          - zyxel_nwa50ax-pro
+      enable_5g_25db:
+        description: '启用5G 25dB修改'
+        type: boolean
+        required: true
+        default: true
+     
+  schedule:
+    - cron: '35 5 * * 1' # 每周一 05:35 UTC（北京时间 13:35）
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  FEEDS_CONF: feeds.conf.default
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+  WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
+  WEBDAV_USERNAME: ${{ secrets.WEBDAV_USERNAME }}
+  WEBDAV_PASSWORD: ${{ secrets.WEBDAV_PASSWORD }}
+  ENABLE_5G_25DB: ${{ github.event.inputs.enable_5g_25db || true }}
+
+jobs:
+  check-source-updates:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: last-checked-sha
+        continue-on-error: true
+      - name: 检查源代码仓库更新
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y --no-install-recommends gh
+          LATEST_SHA=$(gh api repos/padavanonly/immortalwrt-mt798x-24.10/commits/openwrt-24.10-6.6 --jq '.sha' || echo "")
+          if [ -z "$LATEST_SHA" ]; then
+            echo "should_build=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          LAST_CHECKED_FILE="last_checked_sha.txt"
+          LAST_CHECKED_SHA=$(cat "$LAST_CHECKED_FILE" 2>/dev/null || echo "")
+          if [ "$LATEST_SHA" != "$LAST_CHECKED_SHA" ]; then
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "$LATEST_SHA" > "$LAST_CHECKED_FILE"
+          else
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: last-checked-sha
+          path: last_checked_sha.txt
+
+  build:
+    needs: check-source-updates
+    if: github.event_name == 'workflow_dispatch' || needs.check-source-updates.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        device_model: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', github.event.inputs.device_model)) || fromJSON('["cmcc_rax3000m", "cmcc_rax3000m-emmc", "cudy_ap3000-v1", "cudy_ap3000outdoor-v1", "cudy_m3000-v1", "cudy_re3000-v1", "cudy_tr3000-v1", "cudy_tr3000-v1-256mb", "cudy_wr3000-v1", "cudy_wr3000s-v1", "glinet_gl-mt2500", "glinet_gl-mt3000", "glinet_gl-x3000", "glinet_gl-xe3000", "h3c_magic-nx30-pro", "huasifei_wh3000-pro", "huasifei_wh3000-emmc", "jcg_q30-pro", "livinet_zr-3020", "routerich_ax3000", "routerich_ax3000-v1", "xiaomi_mi-router-ax3000t", "xiaomi_mi-router-wr30u-stock", "xiaomi_redmi-router-ax6000-stock", "zyxel_ex5601-t0-stock", "zyxel_nwa50ax-pro"]') }}
+      max-parallel: 18
+    steps:
+      - name: 打印调试信息
+        run: |
+          echo "触发类型：${{ github.event_name }}"
+          echo "设备型号：${{ matrix.device_model }}"
+          echo "5G 25dB：${{ env.ENABLE_5G_25DB }}"
+          echo "选择版本：${{ github.event.inputs.version || 'IMwrt-24.10 (默认)' }}"
+
+      # ==================== 新增：根据下拉菜单自动切换全部参数 ====================
+      - name: 设置编译参数 (24.10 / 25.12)
+        id: set-params
+        run: |
+          if [ "${{ github.event.inputs.version }}" = "IMwrt-25.12" ]; then
+            echo "REPO_URL=https://github.com/chasey-dev/immortalwrt-mt798x-rebase" >> $GITHUB_ENV
+            echo "REPO_BRANCH=25.12-dev" >> $GITHUB_ENV
+            echo "CONFIG_FILE=config/mt7981-ax3000.config" >> $GITHUB_ENV
+            echo "DIY_P1_SH=scripts/diy-part1.sh" >> $GITHUB_ENV
+            echo "DIY_P2_SH=scripts/diy-part3.sh" >> $GITHUB_ENV
+            echo "UPLOAD_NAME=ImmortalWrt2512" >> $GITHUB_ENV
+            echo "VERSION_NAME=25.12" >> $GITHUB_ENV
+            echo "当前编译版本: IMwrt-25.12"
+          else
+            echo "REPO_URL=${{ github.event.inputs.repo_url || 'https://github.com/padavanonly/immortalwrt-mt798x-24.10' }}" >> $GITHUB_ENV
+            echo "REPO_BRANCH=${{ github.event.inputs.repo_branch || 'openwrt-24.10-6.6' }}" >> $GITHUB_ENV
+            echo "CONFIG_FILE=config/24.10-6.6.config" >> $GITHUB_ENV
+            echo "DIY_P1_SH=scripts/diy-part1.sh" >> $GITHUB_ENV
+            echo "DIY_P2_SH=scripts/diy-part2.sh" >> $GITHUB_ENV
+            echo "UPLOAD_NAME=ImmortalWrt2410" >> $GITHUB_ENV
+            echo "VERSION_NAME=24.10" >> $GITHUB_ENV
+            echo "当前编译版本: IMwrt-24.10"
+          fi
+          echo "REPO_URL=${REPO_URL}"
+          echo "REPO_BRANCH=${REPO_BRANCH}"
+          echo "CONFIG_FILE=${CONFIG_FILE}"
+          echo "DIY_P2_SH=${DIY_P2_SH}"
+          echo "固件将上传到: ${UPLOAD_NAME}"
+
+      - name: 设置设备代码
+        run: |
+          echo "device_code=${{ matrix.device_model }}" >> $GITHUB_ENV
+
+      - uses: actions/checkout@v4
+
+      - name: 初始化环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/' /etc/apt/sources.list
+          sudo sed -i 's/security.ubuntu.com/mirrors.aliyun.com/' /etc/apt/sources.list
+          sudo mkdir -p /var/cache/apt/archives && sudo chown $USER:$GROUPS /var/cache/apt/archives
+          sudo apt-get update -y && sudo apt-get install -y --no-install-recommends \
+            build-essential ccache git gawk gcc-multilib g++-multilib libelf-dev libncurses5-dev libncursesw5-dev libssl-dev \
+            python3 python3-pip python3-ply python3-pyelftools rsync unzip wget zlib1g-dev squashfs-tools device-tree-compiler \
+            binutils bison flex gh
+          sudo apt-get clean
+          sudo timedatectl set-timezone "$TZ" || true
+          sudo mkdir -p /workdir && sudo chown $USER:$GROUPS /workdir
+          echo "export PATH=/usr/lib/ccache:\$PATH" >> $GITHUB_ENV
+          echo "export CCACHE_DIR=\$HOME/.ccache" >> $GITHUB_ENV
+          ccache -M 5G
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /var/cache/apt/archives
+            ~/.ccache
+            /workdir/openwrt
+            openwrt/feeds
+          key: ${{ runner.os }}-build-${{ env.REPO_URL }}-${{ env.REPO_BRANCH }}-${{ hashFiles('openwrt/feeds.conf.default', 'openwrt/.config') }}
+          restore-keys: ${{ runner.os }}-build-
+
+      - name: 克隆或更新源代码
+        working-directory: /workdir
+        run: |
+          if [ -d "openwrt" ]; then
+            cd openwrt && git fetch origin $REPO_BRANCH && git reset --hard origin/$REPO_BRANCH
+          else
+            for i in {1..3}; do git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt && break || { echo "克隆失败，重试 $i/3"; sleep 5; }; done
+          fi
+          ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+      - name: 准备Feeds和配置
+        run: |
+          [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+          [ -e files ] && mv files openwrt/files
+          [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+          echo "CONFIG_TARGET_mediatek_filogic_DEVICE_${{ env.device_code }}=y" >> openwrt/.config
+          cd openwrt
+          chmod +x $GITHUB_WORKSPACE/$DIY_P1_SH $GITHUB_WORKSPACE/$DIY_P2_SH
+          $GITHUB_WORKSPACE/$DIY_P1_SH
+          ./scripts/feeds update -a && ./scripts/feeds install -a
+          $GITHUB_WORKSPACE/$DIY_P2_SH
+          make defconfig
+          make download -j8
+
+      - name: 修改5G 25dB
+        if: env.ENABLE_5G_25DB == 'true'
+        working-directory: ./openwrt
+        run: |
+          EEPROM_FILE=package/mtk/drivers/mt_wifi/files/mt7981-default-eeprom/MT7981_iPAiLNA_EEPROM.bin
+          EXPECTED_CONTENT=$(printf '\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B')
+          mkdir -p "$(dirname "$EEPROM_FILE")" && touch "$EEPROM_FILE" && chmod 644 "$EEPROM_FILE"
+          CURRENT_CONTENT=$(dd if="$EEPROM_FILE" bs=1 skip=$((0x445)) count=20 2>/dev/null || echo "")
+          [ "$CURRENT_CONTENT" != "$EXPECTED_CONTENT" ] && printf '\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B\x2B' | dd of="$EEPROM_FILE" bs=1 seek=$((0x445)) conv=notrunc
+
+      - name: 编译固件
+        id: compile
+        timeout-minutes: 180
+        run: |
+          set -e
+          cd openwrt
+          make -j$(nproc) V=s || make -j4 V=s || make -j1 V=s
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compile-log-${{ env.device_code }}
+          path: |
+            openwrt/build_dir/**/*
+            openwrt/logs/**/*
+            openwrt/*.log
+          if-no-files-found: ignore
+
+      - name: 提取版本号
+        id: version
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          cd openwrt
+          VERSION=$(find ./build_dir -name "os-release" | head -1 | xargs grep '^VERSION=' | cut -d= -f2 | tr -d '"[:space:]' | grep -oE "r[0-9]+" || \
+                    find ./bin/targets -name "build.version" | head -1 | xargs cat | tr -d '[:space:]' | grep -oE "r[0-9]+" || \
+                    git describe --tags --abbrev=0 2>/dev/null | grep -oE "r[0-9]+" || echo "commit-$(git rev-parse --short HEAD)")
+          echo "FIRMWARE_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: 整理固件
+        id: organize
+        if: env.UPLOAD_FIRMWARE == 'true' && steps.version.outputs.status == 'success'
+        run: |
+          set -e
+          cd openwrt/bin/targets/*/*
+          rm -rf packages
+          for file in *sysupgrade* *factory*; do
+            [ -f "$file" ] && ! echo "$file" | grep -q "-bl2" && {
+              TYPE=$(echo "$file" | grep -o "sysupgrade\|factory")
+              EXT="${file##*.}"
+              mv "$file" "${{ env.device_code }}_${{ env.VERSION_NAME }}_25dB-on_${{ env.FIRMWARE_VERSION }}_${TYPE}.${EXT}"
+            }
+          done
+          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: 生成README
+        if: steps.version.outputs.status == 'success'
+        run: |
+          set -e
+          cd openwrt/bin/targets/*/*
+          cat << EOF > README.md
+          # ImmortalWrt 固件说明
+          - **固件版本**: ImmortalWrt ${{ env.FIRMWARE_VERSION }}
+          - **设备型号**: ${{ env.device_code }}
+          - **构建版本**: ${{ env.VERSION_NAME }}
+          - **构建时间**: $(date +"%Y-%m-%d %H:%M %Z")
+          - **高功率模式**: ${{ env.ENABLE_5G_25DB == 'true' && '已启用 (5G 25dB)' || '未启用' }}
+          - **来源**: ${{ env.REPO_URL }} (分支: ${{ env.REPO_BRANCH }})
+          ## 功能
+          - 优化网络性能，支持USB共享、HNAT加速、Ksmbd共享等。
+          ${{ env.ENABLE_5G_25DB == 'true' && '- 支持 5G 25dB 高功率。' || '' }}
+          - 默认地址: 192.168.2.1 (密码空)
+          ## 安装
+          - 备份配置，使用sysupgrade保留配置，factory全新安装。
+          - 通过Web上传.bin文件，重启。
+          EOF
+
+      - name: 生成发布描述
+        id: tag
+        if: env.UPLOAD_RELEASE == 'true' && steps.version.outputs.status == 'success'
+        run: |
+          set -e
+          echo "RELEASE_TAG=ImmortalWrt-${{ env.VERSION_NAME }}-${{ env.device_code }}-${{ env.FIRMWARE_VERSION }}" >> $GITHUB_OUTPUT
+          cat << EOF > release.txt
+          # ImmortalWrt ${{ env.VERSION_NAME }} 固件发布
+          - **版本**: ImmortalWrt ${{ env.FIRMWARE_VERSION }}
+          - **型号**: ${{ env.device_code }}
+          - **时间**: $(date +"%Y-%m-%d %H:%M %Z")
+          - **5G**: ${{ env.ENABLE_5G_25DB == 'true' && '已启用' || '未启用' }}
+          ## 特性
+          - 优化性能，支持USB/HNAT/Ksmbd。
+          - 地址: 192.168.2.1 (空密码)
+          ## 安装
+          备份 > 上传sysupgrade/factory > 重启。
+          详情见README.md。仓库: ${{ env.REPO_URL }}
+          EOF
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - uses: softprops/action-gh-release@v2
+        if: steps.tag.outputs.status == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag.outputs.RELEASE_TAG }}
+          body_path: release.txt
+          files: |
+            ${{ env.FIRMWARE }}/*sysupgrade*.*
+            ${{ env.FIRMWARE }}/*factory*.*
+            ${{ env.FIRMWARE }}/README.md
+          overwrite: true
+
+      - name: 上传WebDAV
+        if: steps.version.outputs.status == 'success' && env.WEBDAV_URL && env.WEBDAV_USERNAME && env.WEBDAV_PASSWORD
+        run: |
+          set -e
+          FIRMWARE_FILES=$(find openwrt/bin/targets -type f \( -name "*sysupgrade*.*" -o -name "*factory*.*" -o -name "README.md" \) ! -name "*-bl2*")
+          [ -z "$FIRMWARE_FILES" ] && { echo "没有找到需要上传的文件"; exit 0; }
+          REMOTE_DIR="${{ env.UPLOAD_NAME }}"
+          curl -s -u "${{ env.WEBDAV_USERNAME }}:${{ env.WEBDAV_PASSWORD }}" -X MKCOL "${{ env.WEBDAV_URL }}/$REMOTE_DIR/" || true
+          for FILE in $FIRMWARE_FILES; do
+            BASE_NAME=$(basename "$FILE")
+            if echo "$BASE_NAME" | grep -q "README"; then
+              NEW_NAME="${{ env.device_code }}-README.md"
+            else
+              NEW_NAME="$BASE_NAME"
+            fi
+            SHA256=$(sha256sum "$FILE" | cut -d' ' -f1)
+            echo "正在上传: $NEW_NAME 到 $REMOTE_DIR ..."
+            curl --retry 3 --retry-delay 5 -u "${{ env.WEBDAV_USERNAME }}:${{ env.WEBDAV_PASSWORD }}" \
+              -T "$FILE" "${{ env.WEBDAV_URL }}/$REMOTE_DIR/$NEW_NAME" \
+              -w "%{http_code}" -o /dev/null || exit 1
+            echo "上传成功：$REMOTE_DIR/$NEW_NAME (SHA256: $SHA256)"
+          done
+
+      - name: 清理旧发布
+        if: steps.tag.outputs.status == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release list --repo ${{ github.repository }} --limit 20 --json tagName --jq ".[] | select(.tagName | startswith(\"ImmortalWrt-${{ env.VERSION_NAME }}-${{ env.device_code }}\")) | .tagName" | tail -n +4 | xargs -I {} -r gh release delete {} --yes || true
+
+      - uses: Mattraks/delete-workflow-runs@v2
+        if: steps.tag.outputs.status == 'success'
+        with:
+          retain_days: 7
+          keep_minimum_runs: 3
