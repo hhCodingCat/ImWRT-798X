@@ -104,7 +104,7 @@ jobs:
           echo "CONFIG_TARGET_mediatek_filogic_DEVICE_${DEVICE}=y" >> .config
           echo "CONFIG_CCACHE=y" >> .config
 
-          # 按需追加 eBPF 模块支持 (kmod-sched-bpf, kmod-veth, kmod-xdp-sockets-diag,kmod-nft-queue/kmod-nfnetlink-queue)
+          # 按需追加 eBPF 模块支持
           if [ "${{ env.ENABLE_EBPF_KMODS }}" = "true" ]; then
             echo "CONFIG_KERNEL_CGROUP_BPF=y" >> .config
             echo "CONFIG_KERNEL_XDP_SOCKETS=y" >> .config
@@ -113,8 +113,13 @@ jobs:
             echo "CONFIG_PACKAGE_kmod-xdp-sockets-diag=y" >> .config
             echo "CONFIG_PACKAGE_kmod-nft-queue=y" >> .config
             echo "CONFIG_PACKAGE_kmod-nfnetlink-queue=y" >> .config
-            echo "✅ 已启用 eBPF 常用内核模块 (kmod-sched-bpf, kmod-veth, kmod-xdp-sockets-diag,kmod-nft-queue,kmod-nfnetlink-queue) 与内核 XDP/BPF 支持"
+            echo "CONFIG_PACKAGE_bpftool=y" >> .config
           fi
+
+          # 启用原生内核 BTF 调试符号 (honk/dae 核心需求，保持 host toolchain 默认不下载冗余 LLVM 工具链)
+          echo "CONFIG_KERNEL_DEBUG_INFO=y" >> .config
+          echo "CONFIG_KERNEL_DEBUG_INFO_BTF=y" >> .config
+          echo "CONFIG_KERNEL_DEBUG_INFO_REDUCED=n" >> .config
           
           make defconfig
           make download -j$(nproc) || make download -j1 V=s
