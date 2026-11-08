@@ -1,6 +1,8 @@
 name: ImmortalWrt-25.12固件构建
 
 on:
+  schedule:
+    - cron: '0 20 * * *'
   workflow_dispatch:
     inputs:
       device_model:
@@ -47,7 +49,7 @@ jobs:
             build-essential clang flex bison g++ gawk \
             gcc-multilib g++-multilib gettext git \
             libncurses5-dev libssl-dev python3-setuptools \
-            rsync swig unzip zlib1g-dev file wget curl ccache
+            rsync swig unzip zlib1g-dev file wget curl ccache pahole
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
           sudo mkdir -p /workdir && sudo chown $USER:$USER /workdir
@@ -72,9 +74,9 @@ jobs:
           path: |
             ~/.ccache
             /workdir/openwrt/dl
-          key: ${{ runner.os }}-openwrt-25.12-${{ github.event.inputs.device_model }}-${{ hashFiles('openwrt/include/**') }}
+          key: ${{ runner.os }}-openwrt-25.12-${{ github.event.inputs.device_model || 'cmcc_rax3000m' }}-${{ hashFiles('openwrt/include/**') }}
           restore-keys: |
-            ${{ runner.os }}-openwrt-25.12-${{ github.event.inputs.device_model }}-
+            ${{ runner.os }}-openwrt-25.12-${{ github.event.inputs.device_model || 'cmcc_rax3000m' }}-
 
       - name: 更新 Feeds & 执行 DIY 脚本
         run: |
@@ -134,7 +136,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: compile-log-25.12-${{ github.event.inputs.device_model }}
+          name: compile-log-25.12-${{ github.event.inputs.device_model || 'cmcc_rax3000m' }}
           path: |
             openwrt/logs/**/*
             openwrt/*.log
@@ -150,15 +152,18 @@ jobs:
           DATE_DISPLAY=$(date +'%Y%m%d %H:%M')
           DATE_FILE=$(date +'%Y%m%d_%H%M')
           
+          DEVICE="${{ github.event.inputs.device_model }}"
+          [ -z "$DEVICE" ] && DEVICE="cmcc_rax3000m"
+
           echo "DATE=$DATE_DISPLAY" >> $GITHUB_ENV
           echo "FIRMWARE_VERSION=$(date +%Y%m%d)" >> $GITHUB_ENV
-          echo "device_code=${{ github.event.inputs.device_model }}" >> $GITHUB_ENV
+          echo "device_code=$DEVICE" >> $GITHUB_ENV
           
           # 提取 sysupgrade 固件并标准化命名
           for file in *; do
             [ -f "$file" ] && [[ "$file" != *-bl2* && "$file" != *-recovery* && "$file" != *-sha256sums* ]] && [[ $file == *sysupgrade* ]] && {
               EXT="${file##*.}"
-              NEW_NAME="immortalwrt-25.12-${{ github.event.inputs.device_model }}-${DATE_FILE}-sysupgrade.${EXT}"
+              NEW_NAME="immortalwrt-25.12-${DEVICE}-${DATE_FILE}-sysupgrade.${EXT}"
               mv "$file" "$NEW_NAME"
               echo "✅ 固件就绪: $NEW_NAME"
             }
@@ -176,7 +181,8 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const tag = `Latest-25.12-${{ github.event.inputs.device_model }}`;
+            const device = context.payload.inputs?.device_model || 'cmcc_rax3000m';
+            const tag = `Latest-25.12-${device}`;
             try {
               const release = await github.rest.repos.getReleaseByTag({
                 owner: context.repo.owner,
@@ -199,16 +205,16 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: steps.organize.outputs.status == 'success'
         with:
-          tag_name: Latest-25.12-${{ github.event.inputs.device_model }}
+          tag_name: Latest-25.12-${{ github.event.inputs.device_model || 'cmcc_rax3000m' }}
           files: ${{ env.FIRMWARE_PATH }}/*
           overwrite_files: true
           body: |
-            ## ImmortalWrt-25.12 固件发布 (官方原版)
-            - **目标设备**: ${{ github.event.inputs.device_model }} (NAND)
+            ## ImmortalWrt-25.12 固件发布 (官方原版 · 支持 BTF/honk)
+            - **目标设备**: ${{ github.event.inputs.device_model || 'cmcc_rax3000m' }} (NAND)
             - **内置主题**: luci-theme-aurora
             - **文件共享**: KSMBD (Linux 内核态极速 SMB)
             - **无线驱动**: MTK 原生闭源驱动 mt_wifi (官方默认)
-            - **eBPF 模块支持**: ${{ env.ENABLE_EBPF_KMODS == 'true' && '已集成 (kmod-sched-bpf, kmod-veth, kmod-xdp-sockets-diag)' || '未集成' }}
-            - **体积优化**: 1024K SquashFS 极致压缩，剥除内核冗余 Debug 符号
+            - **内核 BTF / eBPF**: 已原生支持 (CONFIG_KERNEL_DEBUG_INFO_BTF=y, kmod-sched-bpf, bpftool, honk 兼容)
+            - **体积优化**: 1024K SquashFS 极致压缩
             - **编译时间**: ${{ env.DATE }}
             - **默认后台**: 192.168.2.1 / 无密码
